@@ -131,6 +131,9 @@ class ModelOptUNetLoader:
             param_count = sum(p.numel() for p in diffusion_model.parameters())
             print(f"  Parameters: {param_count:,} ({param_count/1e9:.2f}B)")
 
+            print(f"\n  Unwrapping ComfyUI modules for ModelOpt compatibility...")
+            self._unwrap_comfy_ops(diffusion_model)
+            
             # Restore quantized state using ModelOpt
             print(f"\n  Restoring quantized state with mto.restore()...")
             mto.restore(diffusion_model, unet_path)
@@ -251,6 +254,68 @@ class ModelOptUNetLoader:
             f"Could not automatically detect model configuration for {model_type}. "
             f"Please ensure the model file contains proper metadata."
         )
+
+    def _unwrap_comfy_ops(self, model):
+        """
+        Replace ComfyUI's wrapped modules (comfy.ops.disable_weight_init.Linear/Conv2d)
+        with standard torch.nn modules so ModelOpt can recognize them.
+        """
+        replaced_count = 0
+
+        def replace_in_module(parent_module):
+            nonlocal replaced_count
+            for child_name in list(parent_module._modules.keys()):
+                child = parent_module._modules[child_name]
+                if child is None: continue
+
+                child_module_path = child.__class__.__module__
+                child_class_name = child.__class__.__name__
+
+                if child_module_path == 'comfy.ops' and child_class_name == 'Linear' and isinstance(child, torch.nn.Linear):
+                    standard_linear = torch.nn.Linear(
+                        in_features=child.in_features, out_features=child.out_features,
+                        bias=child.bias is not None, device=child.weight.device, dtype=child.weight.dtype
+                    )
+                    with torch.no_grad():
+                        standard_linear.weight.copy_(child.weight)
+                        if child.bias is not None:
+                            standard_linear.bias.copy_(child.bias)
+                    parent_module._modules[child_name] = standard_linear
+                    replaced_count += 1
+
+                elif child_module_path == 'comfy.ops' and child_class_name == 'Conv2d' and isinstance(child, torch.nn.Conv2d):
+                    standard_conv = torch.nn.Conv2d(
+                        in_channels=child.in_channels, out_channels=child.out_channels,
+                        kernel_size=child.kernel_size, stride=child.stride, padding=child.padding,
+                        dilation=child.dilation, groups=child.groups, bias=child.bias is not None,
+                        padding_mode=child.padding_mode, device=child.weight.device, dtype=child.weight.dtype
+                    )
+                    with torch.no_grad():
+                        standard_conv.weight.copy_(child.weight)
+                        if child.bias is not None:
+                            standard_conv.bias.copy_(child.bias)
+                    parent_module._modules[child_name] = standard_conv
+                    replaced_count += 1
+                    
+                elif child_module_path == 'comfy.ops' and child_class_name == 'Conv1d' and isinstance(child, torch.nn.Conv1d):
+                    standard_conv1d = torch.nn.Conv1d(
+                        in_channels=child.in_channels, out_channels=child.out_channels,
+                        kernel_size=child.kernel_size, stride=child.stride, padding=child.padding,
+                        dilation=child.dilation, groups=child.groups, bias=child.bias is not None,
+                        padding_mode=child.padding_mode, device=child.weight.device, dtype=child.weight.dtype
+                    )
+                    with torch.no_grad():
+                        standard_conv1d.weight.copy_(child.weight)
+                        if child.bias is not None:
+                            standard_conv1d.bias.copy_(child.bias)
+                    parent_module._modules[child_name] = standard_conv1d
+                    replaced_count += 1
+                else:
+                    replace_in_module(child)
+
+        replace_in_module(model)
+        return replaced_count
+
 
 
 # Register the node
